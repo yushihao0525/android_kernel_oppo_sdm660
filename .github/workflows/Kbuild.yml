@@ -1,0 +1,166 @@
+name: 編譯 OPPO-Snapdragon660-Android-Pie の 核心與 Anykernel3 文檔
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      dtb:
+        type: choice
+        description: '是否備份 DTB'                
+        required: true
+        default: 'true'        
+        options:
+        - 'true'
+        - 'false'
+      rekernel:
+        type: choice
+        description: '是否开启 RE:Kernel'                
+        required: true
+        default: 'false'        
+        options:
+        - 'true'
+        - 'false'
+      debug:
+        type: choice
+        description: '是否开启快速进入 Recovery 模式'                
+        required: true
+        default: 'false'        
+        options:
+        - 'true'
+        - 'false'
+      device:
+        type: choice
+        description: '請選擇裝置名稱'        
+        required: true
+        options:
+        - 'OPPO R11'
+        - 'OPPO R11t'
+        - 'OPPO R11 Plus'
+        - 'OPPO R11 Plusk'
+        - 'OPPO R11 Pluskt'
+        - 'OPPO R11s'
+        - 'OPPO R11sPlus'
+        - 'OPPO R11sPlust'
+      target:
+        type: choice
+        description: '請選擇裝置內核代號'
+        required: true
+        options:
+        - '16051'
+        - '16052'
+        - '16103'
+        - '16118'
+        - '16116'
+        - '17011'
+        - '17013'
+        - '17021'
+        - '17023'
+
+jobs:
+  build:
+    name: ${{ github.actor }}編譯嘅${{ github.event.inputs.device }}核心
+    runs-on: ubuntu-22.04
+    steps:
+
+      - name: 獲取分支嘅名稱
+        id: branch-names
+        uses: tj-actions/branch-names@v8
+
+      - name: 設定5GIB嘅SWAP
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 5
+
+      - name: 安裝所需嘅環境
+        run: |
+          sudo apt-get update
+          sudo apt-get install git automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
+          mkdir -p $GITHUB_WORKSPACE/workdir
+          cd $GITHUB_WORKSPACE/workdir
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+
+      - name: 獲取 ZyCromerZ-Clang20 工具鏈
+        run: |
+          wget https://github.com/ZyCromerZ/Clang/releases/download/20.0.0git-20241109-release/Clang-20.0.0git-20241109.tar.gz -O $GITHUB_WORKSPACE/workdir/zyc_clang20.tar.gz
+          mkdir $GITHUB_WORKSPACE/workdir/clang
+          tar zxvf $GITHUB_WORKSPACE/workdir/zyc_clang20.tar.gz -C $GITHUB_WORKSPACE/workdir/clang
+  
+      - name: 獲取 ${{ github.event.inputs.device }} 嘅核心源碼
+        run: |
+          git clone --recursive https://github.com/$GITHUB_REPOSITORY/ -b ${{ steps.branch-names.outputs.current_branch }} --depth 1 $GITHUB_WORKSPACE/workdir/source
+
+      - name: 設定 Ccache 嘅容量
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+         key: build-kernel-mido-kernel
+         max-size: 2G
+
+      - name: 添加 RE:Kernel 功能
+        run: |
+          if [ "${{ github.event.inputs.rekernel }}" == "true" ]; then
+             echo -e "\nCONFIG_REKERNEL=y"  >> $GITHUB_WORKSPACE/workdir/source/arch/arm64/configs/sdm660-perf_defconfig
+          fi
+
+      - name: 添加快速进入 Recovery 模式功能
+        run: |
+          if [ "${{ github.event.inputs.debug }}" == "true" ]; then
+             echo -e "\nCONFIG_ELYSIA_DEBUG=y"  >> $GITHUB_WORKSPACE/workdir/source/arch/arm64/configs/sdm660-perf_defconfig
+          fi
+
+      - name: 編譯 ${{ github.event.inputs.device }} 核心
+        run: |
+          export KBUILD_BUILD_HOST=Github-Action
+          export KBUILD_BUILD_USER=$(echo ${{ github.actor }})
+          export ARCH="arm64"
+          export SUBARCH="arm64"
+          export PATH="$GITHUB_WORKSPACE/workdir/clang/bin/:$PATH"
+          export CROSS_COMPILE="aarch64-linux-gnu-"
+          cd $GITHUB_WORKSPACE/workdir/source
+          export OPPO_TARGET_DEVICE="MSM_${{ github.event.inputs.target }}"
+          make O=out sdm660-perf_defconfig CC="ccache clang"
+          make -j$(nproc --all) O=out CC="ccache clang" 2>&1 | tee kernel.log
+
+      - name: 上傳編譯日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: android_kernel_oppo_sdm660_${{ github.event.inputs.target }}_${{ env.BUILD_TIME }}_kernel.log
+          path: workdir/source/kernel.log
+
+      - name: 檢查 ${{ github.event.inputs.device }} 嘅內核文檔
+        run: |
+          cd $GITHUB_WORKSPACE/workdir/source
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+              echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
+          else
+              echo "Kernel output file is empty"
+              exit 1
+          fi
+
+      - name: 制作 ${{ github.event.inputs.device }} 嘅 Anykernel3 文檔
+        if: env.CHECK_FILE_IS_OK == 'true'
+        run: |
+          git clone https://github.com/$GITHUB_REPOSITORY/ -b prebuilt_ak3 --depth 1 $GITHUB_WORKSPACE/workdir/ak3
+          rm -r $GITHUB_WORKSPACE/workdir/ak3/.git
+          cp $GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/workdir/ak3
+
+      - name: 上傳 ${{ github.event.inputs.device }} 嘅 AnyKernel3 文檔
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3_oppo_sdm660_${{ github.event.inputs.target }}_${{ env.BUILD_TIME }}
+          path: workdir/ak3/*
+          
+      - name: 制作 DTB 備份
+        if: env.CHECK_FILE_IS_OK == 'true'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/workdir/dtb
+          cd $GITHUB_WORKSPACE/workdir/dtb
+          if [ "${{ github.event.inputs.dtb }}" == "true" ]; then 
+             cp $GITHUB_WORKSPACE/workdir/source/out/arch/arm64/boot/dts/1*/*.dtb $GITHUB_WORKSPACE/workdir/dtb
+          fi
+
+      - name: 上傳 DTB 備份
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DTB
+          path: workdir/dtb/*
